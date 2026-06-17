@@ -33,19 +33,34 @@ def _temp_path():
     return os.path.join(tempfile.gettempdir(), "jq_webbridge_payload.json")
 
 
+def _check_curl():
+    """检查 curl 是否可用，不可用则报友好错误"""
+    try:
+        subprocess.run([CURL, "--version"], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=5)
+    except FileNotFoundError:
+        sys.exit(f"ERROR: '{CURL}' 未找到。请安装 curl 或将其加入 PATH。\n"
+                 "Windows: https://curl.se/windows/  |  macOS: brew install curl")
+    except Exception:
+        pass  # 能执行但返回非 0，也还能用
+
 def _send(payload, session=SESSION):
     """发送 JSON payload 到 WebBridge，返回解析后的 dict"""
     payload["session"] = session
     tmp = _temp_path()
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
-    r = subprocess.run(
-        [CURL, "-s", "-X", "POST",
-         "http://127.0.0.1:10086/command",
-         "-H", "Content-Type: application/json",
-         "--data-binary", "@" + tmp],
-        **_RUN_KWARGS,
-    )
+    try:
+        r = subprocess.run(
+            [CURL, "-s", "-X", "POST",
+             "http://127.0.0.1:10086/command",
+             "-H", "Content-Type: application/json",
+             "--data-binary", "@" + tmp],
+            **_RUN_KWARGS,
+        )
+    except FileNotFoundError:
+        sys.exit(f"ERROR: '{CURL}' 未找到。请安装 curl 或将其加入 PATH。\n"
+                 "Windows: https://curl.se/windows/  |  macOS: brew install curl")
     return json.loads(r.stdout.strip())
 
 
