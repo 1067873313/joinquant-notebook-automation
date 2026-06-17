@@ -5,7 +5,7 @@ description: |
   当用户提到"聚宽"、"JoinQuant"、"量化平台"、"策略研究"等关键词时使用。
   依赖 Kimi WebBridge 技能操控浏览器。
 metadata:
-  version: "3.0.0"
+  version: "3.1.0"
 ---
 
 # 聚宽 JoinQuant 量化研究平台
@@ -14,13 +14,14 @@ metadata:
 
 ## 前置条件
 
-- **浏览器必须打开至少一个网页标签页**，WebBridge 扩展才会连接。光是浏览器开着但没页面是不够的。
+- **Kimi WebBridge 浏览器扩展必须在浏览器中已安装并启用**。访问 `edge://extensions/`（Edge）或 `chrome://extensions/`（Chrome）确认。扩展装好但未启用一样连不上。
+- **浏览器必须打开至少一个网页标签页**，WebBridge 扩展才会连接 daemon。光是浏览器进程开着但没有标签页是不够的。
 - 用户已在浏览器登录聚宽（https://www.joinquant.com）—— **未登录会停在登录页，iframe 永远加载不出研究环境**
 - Kimi WebBridge daemon 正在运行
 
 ### 启动序列（重要）
 
-浏览器刚打开时，扩展需要几秒才能连上 daemon。立即请求会返回 `no extension connected`。
+浏览器刚打开时，扩展需要几秒才能连上 daemon。立即请求会返回 `session has no tab` 或 `no extension connected`。
 可以用 `start https://...`（Windows）或 `open`（macOS）自动打开浏览器到聚宽：
 
 ```bash
@@ -38,6 +39,8 @@ xdg-open https://www.joinquant.com
 import time, subprocess, json, os, tempfile
 
 CURL = "curl.exe" if os.name == "nt" else "curl"
+# Windows GBK 终端必须加 encoding/errors，否则中文 print 会炸
+_ENV = dict(encoding="utf-8", errors="replace")
 
 def wb_eval(code):
     payload = {"action": "evaluate", "args": {"code": code}, "session": "joinquant"}
@@ -47,7 +50,8 @@ def wb_eval(code):
     r = subprocess.run(
         [CURL, "-s", "-X", "POST", "http://127.0.0.1:10086/command",
          "-H", "Content-Type: application/json", "--data-binary", "@" + tmp],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        **_ENV)
     return json.loads(r.stdout.strip())
 
 # 轮询：扩展启动需要时间
@@ -59,16 +63,32 @@ for attempt in range(15):
     time.sleep(2)
 else:
     print("扩展未连接，请用户检查浏览器")
+    print("排查步骤：1) 浏览器标签页是否打开？ 2) 扩展是否已启用？ 3) daemon 是否在运行？")
+```
+
+#### 重启注意事项
+
+杀掉旧 daemon 后残留的 `daemon.pid` 文件会阻止重启：
+```bash
+# 停止 daemon
+taskkill //F //IM kimi-webbridge.exe
+# 删除残留 PID 文件（关键！不然重启会报 "The file exists"）
+rm "%USERPROFILE%\.kimi-webbridge\daemon.pid"
+# 重新启动
+"%USERPROFILE%\.kimi-webbridge\bin\kimi-webbridge.exe" run &
 ```
 
 ### 常见错误对照
 
 | 错误信息 | 原因 | 解决 |
 |---------|------|------|
-| `no extension connected` | 浏览器没开 / 扩展刚启动还没连上 | 轮询等待，或让用户打开浏览器 |
-| `session "joinquant" tab was closed — navigate first` | 浏览器被关闭后重开，旧 session 的标签页已失效 | 先 `navigate` 重建 session |
+| `no extension connected` | 浏览器扩展未连接 daemon（扩展未装/未启用/daemon 刚启动） | 先轮询等待 15 次，不行就检查浏览器扩展是否启用；某些时候 navigate 一次后会变成 `session has no tab`，说明扩展其实连上了只是 session 未建立 |
+| `session "joinquant" tab was closed — navigate first` | 扩展连上了但当前 session 的标签页已失效（浏览器关闭后重开） | 先 `navigate` 重建 session |
+| `session "joinquant" has no tab — navigate or find_tab first` | session 未建立或已过期 | navigate 创建新 session |
 | `Cannot read properties of null (reading 'contentDocument')` | navigate 成功但 iframe 还没渲染出来 | 轮询 `document.getElementById('research')` |
 | iframe URL 停在 `/user/login/...` | 用户未登录 | 提示用户先登录，登录前不要继续操作 |
+| `Error: write pid: open daemon.pid: The file exists` | daemon 异常退出后 pid 文件残留 | 删除 `%USERPROFILE%\.kimi-webbridge\daemon.pid` 后重启 |
+| `UnicodeEncodeError: 'gbk' codec can't encode` | Windows 终端 GBK 编码无法输出中文 | `subprocess.run` 加 `encoding='utf-8', errors='replace'` |
 
 ## 工作流程
 
@@ -137,7 +157,7 @@ var cm = d.querySelector('.CodeMirror').CodeMirror;
 cm.setValue('print("hello")');
 ```
 
-**多行代码用数组+join：**
+**多行代码用数组+join（仅限 1~3 行简单代码）：**
 
 ```javascript
 var nl = String.fromCharCode(10);
@@ -146,6 +166,8 @@ cm.setValue(code);
 ```
 
 > `String.fromCharCode(10)` 代替 `\n` 是为了避免各平台 shell 的转义差异问题。
+
+> ⚠️ **超过 3 行代码不要用这种拼接方式**。多层 Python→JSON→JS 引号嵌套极易产生 `SyntaxError: Unexpected identifier` 或 `Invalid or unexpected token`。几十行以上的策略代码**必须用下面的 `write_cell.py` 方案**（模板字面量读取本地文件）。
 
 ### 4. 执行单元格
 
@@ -257,7 +279,9 @@ import json, os, subprocess, sys, tempfile
 CURL = "curl.exe" if sys.platform == "win32" else "curl"
 
 # 兼容 Python 3.6：不用 capture_output, text 参数
-_RUN = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+# Windows GBK 终端必须加 encoding/errors，否则中文输出会 UnicodeEncodeError
+_RUN = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+            encoding="utf-8", errors="replace")
 try:
     _RUN["text"] = True           # Python 3.7+
 except TypeError:
@@ -283,7 +307,7 @@ def wb(code):
     return json.loads(r.stdout.strip())
 ```
 
-> **兼容性**：不使用 `capture_output`（Python 3.7+ 才有），改用 `stdout=PIPE, stderr=PIPE` 兼容 3.6。`ensure_ascii=False` 确保中文注释不被转成 `\uXXXX`。
+> **兼容性**：不使用 `capture_output`（Python 3.7+ 才有），改用 `stdout=PIPE, stderr=PIPE` 兼容 3.6。`ensure_ascii=False` 确保中文注释不被转成 `\uXXXX`。**Windows 必加 `encoding="utf-8", errors="replace"`**，否则 `print()` 输出中文时 GBK 会炸。
 
 ### 长 JS 代码用函数包装
 
@@ -377,8 +401,9 @@ import json, subprocess, time, os, tempfile
 
 CURL = "curl.exe" if os.name == "nt" else "curl"
 
-# Python 3.6+ 兼容写法
-_RUN = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": 30}
+# Python 3.6+ 兼容写法 + Windows GBK 终端保护
+_RUN = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": 30,
+        "encoding": "utf-8", "errors": "replace"}
 try: _RUN["text"] = True
 except TypeError: _RUN["universal_newlines"] = True
 
@@ -477,18 +502,25 @@ payload = {'action': 'screenshot', 'args': {'format': 'jpeg', 'quality': 85}, 's
 
 ## 注意事项
 
-- **浏览器必须打开一个网页**，光浏览器开启但没页面，扩展不连接。
-- **每次操作前检查连接**：用轮询而非单次 curl，扩展启动有数秒延迟。遇到 `session tab closed` 错误先 navigate。
+- **浏览器扩展必须安装并启用**。Kimi WebBridge 浏览器扩展是操控浏览器的前提，只开 daemon 不够。访问 `edge://extensions/` 或 `chrome://extensions/` 确认。
+- **浏览器必须打开一个网页**，光浏览器进程开启但没标签页，扩展不连接。
+- **每次操作前检查连接**：用轮询而非单次 curl，扩展启动有数秒延迟。遇到 `session tab closed` 或 `session has no tab` 错误先 navigate。
+- **区分两个错误**：`no extension connected` = 扩展根本没连上 daemon；`session has no tab` = 扩展连上了但 session 未建立。后者 navigate 即可修复，前者要检查扩展状态。
+- **Windows GBK 终端问题**：所有 `subprocess.run` 必须加 `encoding="utf-8", errors="replace"`，否则 `print()` 中文/emoji 会 `UnicodeEncodeError`。如果怀疑输出编码问题，用写文件代替 print：
+  ```python
+  with open("output.txt", "w", encoding="utf-8") as f:
+      f.write(val)
+  ```
+- **daemon.pid 残留**：kill daemon 后必须删除 `%USERPROFILE%\.kimi-webbridge\daemon.pid`，否则重启报 `The file exists`。
 - **关闭浏览器不会关闭运行中的 Notebook 内核**——它们持续占用聚宽的内存和 CPU。每次进入研究平台先通过 API 清理旧内核（见第 7 节）。
 - 每次访问聚宽 iframe，都从 `document.getElementById('research').contentDocument` 开始。
 - 写代码必须用 `cm.setValue()`（经典 Jupyter 的 CodeMirror API），不是 `fill` 工具。
 - 执行前必须 `.click()` 选中单元格；优先点 `.input_area` 而不是 `.cell` 更可靠。
 - `data-jupyter-action` 是标准选择器，但在 JSON 嵌套字符串中属性值引号容易丢失。**在 Python 调用的场景下，用 `button.title === '运行'` 更可靠。**
 - 如果弹出新标签页（popup），WebBridge 无法控制——改用 API 创建 notebook + iframe 导航。
-- `String.fromCharCode(10)` 是避免各平台 shell 转义问题的关键技巧。
+- `String.fromCharCode(10)` + 数组拼接仅适合 1~3 行代码。**超过 3 行必须用 `write_cell.py`（JS 模板字面量读取本地文件），否则引号嵌套必然翻车。**
 - 截图路径在 Windows 下是 `C:\Users\...`，WSL 下映射为 `/mnt/c/Users/...`。
 - **聚宽环境网络受限**：研究环境的容器可能无法访问外网 API（如 Binance、CoinGecko）。如果要获取外部数据，最好在**本地**先下载好，再写入到 notebook 中。
-- **大规模代码**（几十行以上）不要用 `['line1', 'line2'].join(nl)` 的方式，改用 `write_cell.py` 辅助脚本从本地文件读取。
 - **curl 依赖**：`jq_helper.py` 和 `write_cell.py` 依赖系统自带 curl。Windows 10+ 自带了 `curl.exe`，但某些精简版或旧系统可能没有，可用 `where curl`（Windows）或 `which curl`（macOS/Linux）检查。
 
 ## 与本地 JupyterLab 的区别
