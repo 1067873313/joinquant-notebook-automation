@@ -188,32 +188,38 @@ for (var i = 0; i < btns.length; i++) {
 ### 核心模式
 
 ```python
-import json, subprocess, sys, os, tempfile
+import json, os, subprocess, sys, tempfile
 
 CURL = "curl.exe" if sys.platform == "win32" else "curl"
 
+# 兼容 Python 3.6：不用 capture_output, text 参数
+_RUN = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+try:
+    _RUN["text"] = True           # Python 3.7+
+except TypeError:
+    _RUN["universal_newlines"] = True  # Python 3.6
+
 def wb(code):
-    """向 WebBridge 发送 evaluate 请求并返回响应"""
+    """向 WebBridge 发送 evaluate 请求，返回 Python dict"""
     payload = {
-        'action': 'evaluate',
-        'args': {'code': code},
-        'session': 'joinquant',
+        "action": "evaluate",
+        "args": {"code": code},
+        "session": "joinquant",
     }
-    # 使用系统临时目录，跨平台兼容
     tmp = os.path.join(tempfile.gettempdir(), "jq_webbridge_payload.json")
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(payload, f, ensure_ascii=False)  # ← 保持中文原样
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)  # False = 中文不转义
     r = subprocess.run(
-        [CURL, '-s', '-X', 'POST',
-         'http://127.0.0.1:10086/command',
-         '-H', 'Content-Type: application/json',
-         '--data-binary', '@' + tmp],
-        capture_output=True, text=True, timeout=30,
+        [CURL, "-s", "-X", "POST",
+         "http://127.0.0.1:10086/command",
+         "-H", "Content-Type: application/json",
+         "--data-binary", "@" + tmp],
+        **_RUN,
     )
-    return r.stdout.strip()
+    return json.loads(r.stdout.strip())
 ```
 
-> **跨平台说明**：`tempfile.gettempdir()` 在 Windows 上返回 `C:\Users\<用户名>\AppData\Local\Temp`，macOS/Linux 返回 `/tmp`，无需手动指定。`ensure_ascii=False` 确保中文注释不被转成 `\uXXXX`。
+> **兼容性**：不使用 `capture_output`（Python 3.7+ 才有），改用 `stdout=PIPE, stderr=PIPE` 兼容 3.6。`ensure_ascii=False` 确保中文注释不被转成 `\uXXXX`。
 
 ### 长 JS 代码用函数包装
 
@@ -239,9 +245,14 @@ js = '''(function(){
 
 ```python
 """将本地 Python 文件写入 Jupyter 单元格"""
-import json, subprocess, sys, os, tempfile
+import json, os, subprocess, sys, tempfile
 
 CURL = "curl.exe" if sys.platform == "win32" else "curl"
+_RUN = dict(stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+try:
+    _RUN["text"] = True
+except TypeError:
+    _RUN["universal_newlines"] = True
 
 def wb(code, session="joinquant"):
     payload = {"action": "evaluate", "args": {"code": code}, "session": session}
@@ -253,29 +264,36 @@ def wb(code, session="joinquant"):
          "http://127.0.0.1:10086/command",
          "-H", "Content-Type: application/json",
          "--data-binary", "@" + tmp],
-        capture_output=True, text=True, timeout=30,
+        **_RUN,
     )
-    return r.stdout.strip()
+    return json.loads(r.stdout.strip())
 
 def escape_for_template(text):
-    """转义 JS 模板字面量中的特殊字符：\\, `, ${"""
+    """转义 JS 模板字面量中的特殊字符"""
     text = text.replace("\\", "\\\\")
     text = text.replace("`", "\\`")
     text = text.replace("${", "\\${")
     return text
 
+# 确保有单元格被选中
+wb("(function(){"
+   "var d=document.getElementById('research').contentDocument;"
+   "var sel=d.querySelector('.cell.selected');"
+   "if(sel)return'ok';"
+   "d.querySelectorAll('.cell')[0].click();"
+   "return'auto';"
+   "})()")
+
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     py_code = f.read()
 
 escaped = escape_for_template(py_code)
-
-js_code = f"""(function() {{
-  var d = document.getElementById('research').contentDocument;
-  var cm = d.querySelector('.cell.selected .CodeMirror').CodeMirror;
-  cm.setValue(`{escaped}`);
-  return 'ok';
-}})()"""
-
+js_code = ("(function(){"
+           "var d=document.getElementById('research').contentDocument;"
+           "var cm=d.querySelector('.cell.selected .CodeMirror').CodeMirror;"
+           "cm.setValue(`" + escaped + "`);"
+           "return'ok';"
+           "})()")
 print(wb(js_code))
 ```
 
