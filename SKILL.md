@@ -15,18 +15,60 @@ metadata:
 ## 前置条件
 
 - **浏览器必须打开至少一个网页标签页**，WebBridge 扩展才会连接。光是浏览器开着但没页面是不够的。
-- 用户已在浏览器登录聚宽（https://www.joinquant.com）
+- 用户已在浏览器登录聚宽（https://www.joinquant.com）—— **未登录会停在登录页，iframe 永远加载不出研究环境**
 - Kimi WebBridge daemon 正在运行
 
-### 连接检查
+### 启动序列（重要）
+
+浏览器刚打开时，扩展需要几秒才能连上 daemon。立即请求会返回 `no extension connected`。
+可以用 `start https://...`（Windows）或 `open`（macOS）自动打开浏览器到聚宽：
 
 ```bash
-curl -s -X POST http://127.0.0.1:10086/command \
-  -H "Content-Type: application/json" \
-  -d '{"action":"evaluate","args":{"code":"document.title + \" | \" + location.href"},"session":"joinquant"}'
+# Windows
+start https://www.joinquant.com
+# macOS
+open https://www.joinquant.com
+# Linux
+xdg-open https://www.joinquant.com
 ```
 
-返回 `ok:true` 表示连接正常。如果返回 `no extension connected`，让用户打开浏览器任意页面后重试。
+然后**轮询等待连接**（不要单次检查就放弃）：
+
+```python
+import time, subprocess, json, os, tempfile
+
+CURL = "curl.exe" if os.name == "nt" else "curl"
+
+def wb_eval(code):
+    payload = {"action": "evaluate", "args": {"code": code}, "session": "joinquant"}
+    tmp = os.path.join(tempfile.gettempdir(), "jq_payload.json")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    r = subprocess.run(
+        [CURL, "-s", "-X", "POST", "http://127.0.0.1:10086/command",
+         "-H", "Content-Type: application/json", "--data-binary", "@" + tmp],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+    return json.loads(r.stdout.strip())
+
+# 轮询：扩展启动需要时间
+for attempt in range(15):
+    res = wb_eval("document.title")
+    if res.get("ok"):
+        print("connected:", res["data"]["value"])
+        break
+    time.sleep(2)
+else:
+    print("扩展未连接，请用户检查浏览器")
+```
+
+### 常见错误对照
+
+| 错误信息 | 原因 | 解决 |
+|---------|------|------|
+| `no extension connected` | 浏览器没开 / 扩展刚启动还没连上 | 轮询等待，或让用户打开浏览器 |
+| `session "joinquant" tab was closed — navigate first` | 浏览器被关闭后重开，旧 session 的标签页已失效 | 先 `navigate` 重建 session |
+| `Cannot read properties of null (reading 'contentDocument')` | navigate 成功但 iframe 还没渲染出来 | 轮询 `document.getElementById('research')` |
+| iframe URL 停在 `/user/login/...` | 用户未登录 | 提示用户先登录，登录前不要继续操作 |
 
 ## 工作流程
 
@@ -41,6 +83,28 @@ curl -s -X POST http://127.0.0.1:10086/command \
 ```javascript
 var d = document.getElementById('research').contentDocument;
 ```
+
+> ⚠️ **iframe 是异步加载的**：`navigate` 返回 `success:true` 不代表 iframe 已经渲染完成。立即访问 `contentDocument` 会得到 `null`。必须轮询等待：
+
+```python
+# navigate 之后轮询 iframe 加载
+for attempt in range(15):
+    js = ("(function(){"
+          "var f=document.getElementById('research');"
+          "if(!f)return 'NO_ELEMENT';"
+          "var d=f.contentDocument;"
+          "if(!d)return 'NO_DOC';"
+          "return 'OK:'+d.location.href;"
+          "})()")
+    res = wb_eval(js)
+    val = res.get("data", {}).get("value", "")
+    if "OK:" in str(val):
+        print("iframe ready:", val)
+        break
+    time.sleep(2)
+```
+
+> 如果 iframe URL 停在 `/user/login/...`，说明用户没登录，**停止操作并提示用户登录**。
 
 ### 2. 创建新 Notebook
 
