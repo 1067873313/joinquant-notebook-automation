@@ -39,13 +39,16 @@ def wb(code, session=SESSION):
     tmp = _temp_path()
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False)
-    r = subprocess.run(
-        [CURL, "-s", "-X", "POST",
-         "http://127.0.0.1:10086/command",
-         "-H", "Content-Type: application/json",
-         "--data-binary", "@" + tmp],
-        **_RUN_KWARGS,
-    )
+    try:
+        r = subprocess.run(
+            [CURL, "-s", "-X", "POST",
+             "http://127.0.0.1:10086/command",
+             "-H", "Content-Type: application/json",
+             "--data-binary", "@" + tmp],
+            **_RUN_KWARGS,
+        )
+    except FileNotFoundError:
+        sys.exit(f"ERROR: '{CURL}' not found. Install curl or add it to PATH.")
     return json.loads(r.stdout.strip())
 
 
@@ -118,7 +121,19 @@ def main():
     result = wb(js_code)
     ok = result.get("ok")
     if ok:
-        print("Write: OK  (" + str(len(py_code)) + " chars)")
+        # 验证：读取单元格前 100 字符，确认写入成功
+        verify = wb(
+            "(function(){"
+            "var d=document.getElementById('research').contentDocument;"
+            "var cm=d.querySelector('.cell.selected .CodeMirror');"
+            "return cm ? cm.CodeMirror.getValue().substring(0,100) : 'NO_CM';"
+            "})()"
+        )
+        preview = verify.get("data", {}).get("value", "")
+        if py_code[:50].strip() == preview[:50].strip():
+            print(f"Write: VERIFIED  ({len(py_code)} chars)")
+        else:
+            print(f"Write: WROTE but VERIFY FAILED - expected={py_code[:40]!r}, got={str(preview)[:40]!r}")
     else:
         print("Write: FAILED -", result.get("error", {}).get("message", str(result)))
 
