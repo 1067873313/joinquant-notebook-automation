@@ -370,64 +370,74 @@ print(wb(js_code))
 python write_cell.py strategy.py
 ```
 
-### 完整流程示例（4 个单元格的大策略）
+### 完整流程示例（完整策略）
 
 ```python
-import json, subprocess, time
+import json, subprocess, time, os, tempfile
 
-def wb(code):
-    payload = {'action': 'evaluate', 'args': {'code': code}, 'session': 'joinquant-demo'}
-    with open('/tmp/jq.json', 'w', encoding='utf-8') as f:
-        json.dump(payload, f, ensure_ascii=True)
-    r = subprocess.run(['curl', '-s', '-X', 'POST',
-        'http://127.0.0.1:10086/command',
-        '-H', 'Content-Type: application/json',
-        '--data-binary', '@/tmp/jq.json'], capture_output=True, text=True)
-    return r.stdout.strip()
+CURL = "curl.exe" if os.name == "nt" else "curl"
 
-def wb_js(code):
-    """发送 JS IIFE 到 WebBridge"""
-    return wb(f'''(function(){{{code}}})()''')
+# Python 3.6+ 兼容写法
+_RUN = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE, "timeout": 30}
+try: _RUN["text"] = True
+except TypeError: _RUN["universal_newlines"] = True
 
-# d = iframe document 的快捷引用
+def wb(code, session="joinquant"):
+    payload = {"action": "evaluate", "args": {"code": code}, "session": session}
+    tmp = os.path.join(tempfile.gettempdir(), "jq.json")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False)
+    r = subprocess.run([CURL, "-s", "-X", "POST",
+        "http://127.0.0.1:10086/command",
+        "-H", "Content-Type: application/json",
+        "--data-binary", "@" + tmp], **_RUN)
+    return json.loads(r.stdout.strip())
+
+def js(code):
+    """IIFE 包裹 JS 代码"""
+    if "\n" in code:
+        return "(function(){\n  " + code.replace("\n", "\n  ") + "\n})()"
+    return "(function(){" + code + "})()"
+
 D = 'var d=document.getElementById("research").contentDocument;'
 
-# ==== 写 Cell 0 ====
-# 用 write_cell.py 方式：把 strategy.py 内容写入单元格
-# 先选中一个空单元格，然后：
-# subprocess.run(['python', 'write_cell.py', 'strategy.py'])
+# 1. 用 write_cell.py 写策略代码（推荐）
+# subprocess.run([sys.executable, "write_cell.py", "ma_strategy.py"])
 
-# ==== 写完后依次执行 ====
-# 获取所有单元格，按索引选中并点击运行
-for i in range(4):
-    js = D + f'''
-        var cells = d.querySelectorAll('.cell');
-        cells[{i}].querySelector('.input_area').click();
-        var btns = d.querySelectorAll('button');
-        for (var j = 0; j < btns.length; j++) {{
-            if (btns[j].getAttribute('title') === '运行') {{
-                btns[j].click();
-                break;
-            }}
-        }}
-    '''
-    wb_js(js)
-    time.sleep(5)  # 等待执行
+# 2. 执行当前选中单元格（按 title="运行"）
+run = D + (''
+    'var cells=d.querySelectorAll(\".cell\");'
+    'cells[0].querySelector(\".input_area\").click();'
+    'var btns=d.querySelectorAll(\"button\");'
+    'for(var i=0;i<btns.length;i++){'
+    'if(btns[i].getAttribute(\"title\")===\"\\u8fd0\\u884c\"){btns[i].click();break;}'
+    '}'
+)
+wb(js(run))
 
-# ==== 读取输出 ====
-js = D + '''
-    var cells = d.querySelectorAll('.cell');
-    var out = [];
-    for (var i = 0; i < cells.length; i++) {
-        var t = cells[i].querySelector('.output_text');
-        out.push('Cell ' + i + ': ' + (t ? t.textContent.trim() : '(no output)'));
-    }
-    return out.join(String.fromCharCode(10));
-'''
-print(wb_js(js))
+# 3. 轮询等待执行完成
+for _ in range(15):
+    state = wb(js(D + "return d.querySelectorAll('.cell')[0].querySelector('.input_prompt').textContent;"))
+    val = state.get("data", {}).get("value", "")
+    if "In [*]" not in str(val) and "In [ ]" not in str(val):
+        print("done:", val)
+        break
+    time.sleep(2)
+
+# 4. 读取输出
+output = wb(js(D + ''
+    'var cells=d.querySelectorAll(\".cell\");'
+    'var out=[];'
+    'for(var i=0;i<cells.length;i++){'
+    'var t=cells[i].querySelector(\".output_text\");'
+    'out.push(\"Cell \"+i+\": \"+(t?t.textContent.trim():\"(empty)\"));'
+    '}'
+    'return out.join(String.fromCharCode(10));'
+))
+print(output.get("data", {}).get("value", ""))
 ```
 
-> **关于 f-string 双层花括号**：`{D}` 是 Python f-string 变量替换，而 `{{` / `}}` 输出字面花括号给 JS 用。
+> **关于引号**：JS 字符串里用 `\"` 转义双引号，因为外面 Python 字符串也是双引号。中文 `\u8fd0\u884c` = "运行"。
 
 ---
 
@@ -468,6 +478,8 @@ payload = {'action': 'screenshot', 'args': {'format': 'jpeg', 'quality': 85}, 's
 ## 注意事项
 
 - **浏览器必须打开一个网页**，光浏览器开启但没页面，扩展不连接。
+- **每次操作前检查连接**：用轮询而非单次 curl，扩展启动有数秒延迟。遇到 `session tab closed` 错误先 navigate。
+- **关闭浏览器不会关闭运行中的 Notebook 内核**——它们持续占用聚宽的内存和 CPU。每次进入研究平台先通过 API 清理旧内核（见第 7 节）。
 - 每次访问聚宽 iframe，都从 `document.getElementById('research').contentDocument` 开始。
 - 写代码必须用 `cm.setValue()`（经典 Jupyter 的 CodeMirror API），不是 `fill` 工具。
 - 执行前必须 `.click()` 选中单元格；优先点 `.input_area` 而不是 `.cell` 更可靠。
@@ -477,6 +489,7 @@ payload = {'action': 'screenshot', 'args': {'format': 'jpeg', 'quality': 85}, 's
 - 截图路径在 Windows 下是 `C:\Users\...`，WSL 下映射为 `/mnt/c/Users/...`。
 - **聚宽环境网络受限**：研究环境的容器可能无法访问外网 API（如 Binance、CoinGecko）。如果要获取外部数据，最好在**本地**先下载好，再写入到 notebook 中。
 - **大规模代码**（几十行以上）不要用 `['line1', 'line2'].join(nl)` 的方式，改用 `write_cell.py` 辅助脚本从本地文件读取。
+- **curl 依赖**：`jq_helper.py` 和 `write_cell.py` 依赖系统自带 curl。Windows 10+ 自带了 `curl.exe`，但某些精简版或旧系统可能没有，可用 `where curl`（Windows）或 `which curl`（macOS/Linux）检查。
 
 ## 与本地 JupyterLab 的区别
 
