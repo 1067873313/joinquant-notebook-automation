@@ -29,6 +29,8 @@ curl -s -X POST http://127.0.0.1:10086/command \
 
 返回 `{"ok":true,...}` 表示连接成功。
 
+> ⚠️ 扩展启动有数秒延迟，刚打开浏览器时可能返回 `no extension connected`。**不要只试一次就放弃**——轮询等待即可。详见 [SKILL.md](./SKILL.md#启动序列重要)。
+
 ## 📦 工具脚本
 
 | 脚本 | 用途 |
@@ -80,6 +82,9 @@ python write_cell.py my_strategy.py
 - **网络限制**：聚宽研究环境的容器可能无法访问外网 API（如 Binance、CoinGecko）。建议在本地先下载外部数据，再写入 Notebook。
 - **弹窗限制**：WebBridge 无法控制弹出新标签页，需改用 API 创建 Notebook + iframe 导航。
 - **浏览器要求**：浏览器必须保持打开状态且至少有一个网页标签页，WebBridge 扩展才能维持连接。
+- **扩展启动延迟**：浏览器刚打开时扩展需要几秒连上 daemon，立即请求会失败。必须轮询等待，详见 SKILL.md。
+- **内核不随浏览器关闭**：关闭浏览器不会停止聚宽的 Notebook 内核，它们会继续消耗内存。每次操作前应通过 API 清理旧内核。
+- **依赖 curl**：助手脚本 `jq_helper.py` 和 `write_cell.py` 依赖系统自带 curl。Windows 10+ 自带，macOS/Linux 通常自带。如缺失，脚本会给出安装提示。
 
 ## 🔧 技术栈
 
